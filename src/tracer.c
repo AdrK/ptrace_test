@@ -48,6 +48,7 @@ int main(int argc, char* argv[])
     rem.iov_len = bufferLength;
 
     ssize_t nread = process_vm_readv(pid, &loc, 1, &rem, 1, 0);
+
     if(nread < 0)
     {
         perror("process_vm_readv");
