@@ -18,32 +18,19 @@
 
 uint64_t counter = 0;
 
-int main(int argc, char *argv[]) {
-  pid_t child;
-  struct user_regs_struct uregs;
-  child = fork();
-  if (child == 0) {
-    printf("Started child!\n");
-    struct timespec ts = {.tv_sec = 0, .tv_nsec = 1e8};
-    for (counter = 0; counter < 20; counter++) {
-      printf("child: %d\n", counter);
-      nanosleep(&ts, NULL);
-    }
-  } else {
-    struct timespec ts = {.tv_sec = 0, .tv_nsec = 2e8};
-    struct iovec loc;
-    struct iovec rem;
-    ssize_t bufferLength = 1024;
-    loc.iov_base = calloc(bufferLength, 1);
-    loc.iov_len = bufferLength;
-    rem.iov_base = &counter;
-    rem.iov_len = sizeof(counter);
-
-    printf("Child pid: %d. Counter address: %p\n", child, &counter);
-
+void child_func() {
+  printf("Started child!\n");
+  struct timespec ts = {.tv_sec = 0, .tv_nsec = 1e8};
+  for (counter = 0;; counter++) {
+    printf("###### child: %lu\n", counter);
     nanosleep(&ts, NULL);
+  }
+}
 
-    if (ptrace(PTRACE_ATTACH, child, NULL, NULL) < 0) {
+void ptrace_test(pid_t pid) {
+  static int attached = 0;
+  if (!attached) {
+    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) < 0) {
       perror("PTRACE_ATTACH");
       // return -errno;
     } else {
@@ -53,39 +40,96 @@ int main(int argc, char *argv[]) {
         if (WIFSTOPPED(status))
           break;
       }
-
-      uint64_t val = ptrace(PTRACE_PEEKDATA, child, &counter, NULL);
-      ptrace(PTRACE_CONT, child, NULL, NULL);
-      printf("ptrace has read: %lu\n", val);
+      attached = 1;
     }
 
-    ssize_t nread = process_vm_readv(child, &loc, 1, &rem, 1, 0);
+    uint64_t val = ptrace(PTRACE_PEEKDATA, pid, &counter, NULL);
+    ptrace(PTRACE_CONT, pid, NULL, NULL);
+    // printf("ptrace has read: %lu\n", val);
+  }
+}
 
-    if (nread < 0) {
-      perror("process_vm_readv");
-      // return -errno;
-    } else {
-      printf("process_vm_readv: %d\n", *((int *)loc.iov_base));
-    }
+#define LOOPS 1000
 
-    int fd = 0;
-    char path_fmt[] = "/proc/%d/mem";
-    char path[1024];
-    snprintf(&path[0], 1024, &path_fmt[0], child);
-    fd = open(path, O_RDONLY);
+void process_vm_readv_test(pid_t pid) {
+  clock_t start, end;
+  start = clock();
 
-    uint64_t counter_read = 0;
-    uint64_t byte_offset = (uint64_t)&counter;
-    if (byte_offset != lseek(fd, byte_offset, SEEK_SET)) {
-      perror("lseek");
-      return -errno;
-    }
-    read(fd, &counter_read, sizeof(counter));
-    close(fd);
+  for (uint64_t i = 0; i < LOOPS; i++) {
+    struct iovec loc;
+    struct iovec rem;
+    ssize_t bufferLength = 1024;
+    loc.iov_base = calloc(bufferLength, 1);
+    loc.iov_len = bufferLength;
+    rem.iov_base = &counter;
+    rem.iov_len = sizeof(counter);
 
-    printf("read from mem file: %lu\n", counter_read);
-
+    ssize_t nread = process_vm_readv(pid, &loc, 1, &rem, 1, 0);
+    /*
+      if (nread < 0) {
+        perror("process_vm_readv");
+        // return -errno;
+      } else {
+        printf("process_vm_readv: %d\n", *((int *)loc.iov_base));
+      }
+    */
     free(loc.iov_base);
+  }
+
+  end = clock();
+  double total = ((double)(end - start) / CLOCKS_PER_SEC);
+  printf("\nprocess_vm_readv_test: %.4e\n\n", total / LOOPS);
+}
+
+void direct_read_test(pid_t pid) {
+  clock_t start, end;
+  start = clock();
+
+  int fd = 0;
+  char path_fmt[] = "/proc/%d/mem";
+  char path[1024];
+  snprintf(&path[0], 1024, &path_fmt[0], pid);
+
+  fd = open(path, O_RDONLY);
+  uint64_t byte_offset = (uint64_t)&counter;
+  lseek(fd, byte_offset, SEEK_SET);
+
+  for (uint64_t i = 0; i < LOOPS; i++) {
+    uint64_t counter_read = 0;
+
+    /*
+      if (byte_offset != lseek(fd, byte_offset, SEEK_SET)) {
+        perror("lseek");
+        // return -errno;
+      }
+    */
+    read(fd, &counter_read, sizeof(counter));
+
+    // printf("read from mem file: %lu\n", counter_read);
+  }
+  close(fd);
+
+  end = clock();
+  double total = ((double)(end - start) / CLOCKS_PER_SEC);
+  printf("\ndirect_read_test: %.4e\n\n", total / LOOPS);
+}
+
+int main(int argc, char *argv[]) {
+  pid_t child;
+  struct user_regs_struct uregs;
+  child = fork();
+  if (child == 0) {
+    child_func();
+  } else {
+    struct timespec ts = {.tv_sec = 0, .tv_nsec = 2e8};
+    printf("Child pid: %d. Counter address: %p\n", child, &counter);
+    nanosleep(&ts, NULL);
+
+    // ptrace_test(child);
+    process_vm_readv_test(child);
+    direct_read_test(child);
+
+    kill(child, SIGKILL);
     wait(NULL);
     printf("Done!\n");
   }
